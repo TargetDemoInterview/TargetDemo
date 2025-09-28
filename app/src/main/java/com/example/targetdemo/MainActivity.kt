@@ -214,7 +214,13 @@ fun CameraScreen(
                     .padding(8.dp)
             ) {
                 items(logs.size) { i ->
-                    Text(text = logs[i], fontSize = 10.sp, maxLines = 1)
+                    Text(
+                        text = logs[i],
+                        fontSize = 10.sp,
+                        // убираем ограничение maxLines = 1
+                        maxLines = Int.MAX_VALUE,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
         }
