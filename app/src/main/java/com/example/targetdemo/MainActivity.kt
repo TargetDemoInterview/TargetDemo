@@ -4,8 +4,6 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -96,9 +94,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-
-
-
+        // WorkManager запускается один раз, он будет сам обрабатывать отправку
         val workRequest = PeriodicWorkRequestBuilder<UploadWorker>(15, java.util.concurrent.TimeUnit.MINUTES)
             .setConstraints(
                 Constraints.Builder()
@@ -112,7 +108,6 @@ class MainActivity : ComponentActivity() {
             ExistingPeriodicWorkPolicy.KEEP,
             workRequest
         )
-
     }
 
     private fun takePhoto() {
@@ -155,19 +150,25 @@ class MainActivity : ComponentActivity() {
                         val text = "$formatted | Photo ${photoFile.name} | Location: ${location ?: "without location"} | Device: $deviceName"
 
                         Log.d("DB_LOG", text)
-
-                        // 👉 Попробуем отправить в Azure
-                        if (hasInternet()) {
-                            val success = uploadFileToAzure(entity)
-                            if (success) {
-                                db.photoDao().deleteById(entity.id)
-                                val logText = "$formatted | Файл ${photoFile.name} успешно отправлен и удалён из БД"
-                                Log.d("Azure", logText)
-                                withContext(Dispatchers.Main) {
-                                    logViewModel.addLog(logText)
-                                }
-                            }
+                        withContext(Dispatchers.Main) {
+                            logViewModel.addLog(text)
                         }
+
+                        // --- Запустить разовую отправку немедленно (при наличии сети)
+                        val oneTime = OneTimeWorkRequestBuilder<UploadWorker>()
+                            .setConstraints(
+                                Constraints.Builder()
+                                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                                    .build()
+                            )
+                            .build()
+
+                        WorkManager.getInstance(this@MainActivity).enqueueUniqueWork(
+                            "UploadNow",
+                            ExistingWorkPolicy.APPEND_OR_REPLACE, // чтобы новую попытку не игнорировали
+                            oneTime
+                        )
+
                     }
                 }
             }
@@ -189,44 +190,6 @@ class MainActivity : ComponentActivity() {
             null
         }
     }
-
-    private fun hasInternet(): Boolean {
-        val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(network) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-    }
-
-    private suspend fun uploadFileToAzure(photo: PhotoEntity): Boolean {
-        return try {
-            val file = File(photo.imagePath)
-            if (!file.exists()) return false
-
-            // Собираем полный URL (SAS уже содержит ключи)
-            val blobUrl = "https://storagelv426.blob.core.windows.net/containerlv426/${file.name}" +
-                    "?sp=racwl&st=2025-09-28T21:30:45Z&se=2025-10-29T05:45:45Z&spr=https&sv=2024-11-04&sr=c&sig=gH5UAz29ClqswdTlqytGcT%2BU25vZdOUamjdnGVOgSx4%3D"
-
-            val request = java.net.URL(blobUrl).openConnection() as java.net.HttpURLConnection
-            request.requestMethod = "PUT"
-            request.setRequestProperty("x-ms-blob-type", "BlockBlob")
-            request.doOutput = true
-
-            file.inputStream().use { input ->
-                request.outputStream.use { output ->
-                    input.copyTo(output)
-                }
-            }
-
-            val success = request.responseCode in 200..299
-            request.disconnect()
-            success
-        } catch (e: Exception) {
-            Log.e("Azure", "Upload error", e)
-            false
-        }
-    }
-
-
 }
 
 @Composable
@@ -286,7 +249,6 @@ fun CameraScreen(
                     Text(
                         text = logs[i],
                         fontSize = 10.sp,
-                        // убираем ограничение maxLines = 1
                         maxLines = Int.MAX_VALUE,
                         modifier = Modifier.fillMaxWidth()
                     )

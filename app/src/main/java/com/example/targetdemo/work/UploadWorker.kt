@@ -20,16 +20,17 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val db = AppDatabase.getInstance(applicationContext)
         val allPhotos = db.photoDao().getAll()
+        Log.d("Azure", "UploadWorker старт. Найдено записей: ${allPhotos.size}")
 
-        for (photo in allPhotos) {
+        for ((idx, photo) in allPhotos.withIndex()) {
+            Log.d("Azure", "[$idx/${allPhotos.size}] Пытаюсь отправить: ${File(photo.imagePath).name}")
             if (uploadFileToAzure(photo)) {
                 db.photoDao().deleteById(photo.id)
-
                 val formatted = SimpleDateFormat("MM/dd/yyyy HH:mm:ss", Locale.getDefault())
                     .format(Date(photo.timestamp))
-                Log.d("Azure", "$formatted | Файл ${File(photo.imagePath).name} отправлен и удалён из БД")
+                Log.d("Azure", "$formatted | ${File(photo.imagePath).name} → отправлен и удалён из БД")
             } else {
-                Log.e("Azure", "Ошибка загрузки ${photo.imagePath}, повторим позже")
+                Log.e("Azure", "Не удалось отправить: ${photo.imagePath}. Повторим позже.")
                 return@withContext Result.retry()
             }
         }
@@ -40,27 +41,61 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
     private fun uploadFileToAzure(photo: PhotoEntity): Boolean {
         return try {
             val file = File(photo.imagePath)
-            if (!file.exists()) return false
+            if (!file.exists()) {
+                Log.e("Azure", "Файл не найден: ${photo.imagePath}")
+                return false
+            }
 
             val blobUrl = "https://storagelv426.blob.core.windows.net/containerlv426/${file.name}" +
                     "?sp=racwl&st=2025-09-28T21:30:45Z&se=2025-10-29T05:45:45Z&spr=https&sv=2024-11-04&sr=c&sig=gH5UAz29ClqswdTlqytGcT%2BU25vZdOUamjdnGVOgSx4%3D"
 
-            val conn = URL(blobUrl).openConnection() as HttpURLConnection
-            conn.requestMethod = "PUT"
-            conn.setRequestProperty("x-ms-blob-type", "BlockBlob")
-            conn.doOutput = true
+            val conn = (URL(blobUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "PUT"
+                doOutput = true
+                doInput = true
+
+                // ВАЖНО: Azure ожидает тип блоба
+                setRequestProperty("x-ms-blob-type", "BlockBlob")
+
+                // Рекомендуемая версия — пусть совпадает с SAS sv
+                setRequestProperty("x-ms-version", "2024-11-04")
+
+                // Не обязательно, но полезно
+                setRequestProperty("Content-Type", "application/octet-stream")
+
+                // Потоковый режим (чтобы не падало на больших файлах и не требовало Content-Length вручную)
+                if (file.length() <= Int.MAX_VALUE) {
+                    setFixedLengthStreamingMode(file.length().toInt())
+                } else {
+                    // на очень больших — chunked
+                    setChunkedStreamingMode(64 * 1024)
+                }
+            }
 
             file.inputStream().use { input ->
                 conn.outputStream.use { output ->
                     input.copyTo(output)
+                    output.flush()
                 }
             }
 
-            val success = conn.responseCode in 200..299
+            val code = conn.responseCode
+            val success = code in 200..299
+
+            if (!success) {
+                val err = conn.errorStream?.use { es ->
+                    es.readBytes().toString(Charsets.UTF_8)
+                }
+                Log.e("Azure", "HTTP $code при загрузке ${file.name}. error=$err")
+            } else {
+                // Удобный короткий лог успеха
+                Log.d("Azure", "Uploaded ${file.name}, HTTP $code")
+            }
+
             conn.disconnect()
             success
         } catch (e: Exception) {
-            Log.e("Azure", "Ошибка загрузки", e)
+            Log.e("Azure", "Ошибка загрузки ${photo.imagePath}", e)
             false
         }
     }
