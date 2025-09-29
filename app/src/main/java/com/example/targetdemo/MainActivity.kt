@@ -154,7 +154,7 @@ class MainActivity : ComponentActivity() {
                             logViewModel.addLog(text)
                         }
 
-                        // --- Запустить разовую отправку немедленно (при наличии сети)
+
                         val oneTime = OneTimeWorkRequestBuilder<UploadWorker>()
                             .setConstraints(
                                 Constraints.Builder()
@@ -165,7 +165,7 @@ class MainActivity : ComponentActivity() {
 
                         WorkManager.getInstance(this@MainActivity).enqueueUniqueWork(
                             "UploadNow",
-                            ExistingWorkPolicy.APPEND_OR_REPLACE, // чтобы новую попытку не игнорировали
+                            ExistingWorkPolicy.APPEND_OR_REPLACE,
                             oneTime
                         )
 
@@ -226,7 +226,7 @@ fun CameraScreen(
                     Log.e("CameraX", "bind error", e)
                 }
             } else {
-                // выключаем камеру
+                // turn off camera
                 provider.unbindAll()
             }
         }, ContextCompat.getMainExecutor(context))

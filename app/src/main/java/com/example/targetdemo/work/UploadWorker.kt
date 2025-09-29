@@ -21,23 +21,23 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val db = AppDatabase.getInstance(applicationContext)
         val allPhotos = db.photoDao().getAll()
-        Log.d("Azure", "UploadWorker старт. Найдено записей: ${allPhotos.size}")
+        Log.d("Azure", "UploadWorker started. Records found: ${allPhotos.size}")
 
         for ((idx, photo) in allPhotos.withIndex()) {
-            Log.d("Azure", "[$idx/${allPhotos.size}] Пытаюсь отправить: ${File(photo.imagePath).name}")
+            Log.d("Azure", "[$idx/${allPhotos.size}] Trying to upload: ${File(photo.imagePath).name}")
 
             if (uploadFileToAzure(photo)) {
                 if (uploadMetadata(photo)) {
                     db.photoDao().deleteById(photo.id)
                     val formatted = SimpleDateFormat("MM/dd/yyyy HH:mm:ss", Locale.getDefault())
                         .format(Date(photo.timestamp))
-                    Log.d("Azure", "$formatted | Фото и JSON ${File(photo.imagePath).name} → отправлены и запись удалена")
+                    Log.d("Azure", "$formatted | Photo and JSON ${File(photo.imagePath).name} → uploaded and record deleted")
                 } else {
-                    Log.e("Azure", "Фото загружено, но JSON не удалось отправить: ${photo.imagePath}")
+                    Log.e("Azure", "Photo uploaded, but JSON failed to send: ${photo.imagePath}")
                     return@withContext Result.retry()
                 }
             } else {
-                Log.e("Azure", "Не удалось отправить фото: ${photo.imagePath}")
+                Log.e("Azure", "Failed to upload photo: ${photo.imagePath}")
                 return@withContext Result.retry()
             }
         }
@@ -45,12 +45,12 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
         Result.success()
     }
 
-    // 📸 Загрузка самого фото
+    // Photo upload
     private fun uploadFileToAzure(photo: PhotoEntity): Boolean {
         return try {
             val file = File(photo.imagePath)
             if (!file.exists()) {
-                Log.e("Azure", "Файл не найден: ${photo.imagePath}")
+                Log.e("Azure", "File not found: ${photo.imagePath}")
                 return false
             }
 
@@ -84,20 +84,20 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
                 val err = conn.errorStream?.use { es ->
                     es.readBytes().toString(Charsets.UTF_8)
                 }
-                Log.e("Azure", "Ошибка загрузки фото ${file.name}: HTTP $code, $err")
+                Log.e("Azure", "Photo upload error ${file.name}: HTTP $code, $err")
             } else {
-                Log.d("Azure", "Фото ${file.name} успешно загружено, HTTP $code")
+                Log.d("Azure", "Photo ${file.name} Successfully uploaded, HTTP $code")
             }
 
             conn.disconnect()
             success
         } catch (e: Exception) {
-            Log.e("Azure", "Ошибка при загрузке фото ${photo.imagePath}", e)
+            Log.e("Azure", "Error uploading photo ${photo.imagePath}", e)
             false
         }
     }
 
-    // 📝 Формируем JSON-метаданные
+    // metadata
     private fun buildMetadataJson(photo: PhotoEntity): String {
         val json = JSONObject()
         json.put("fileName", File(photo.imagePath).name)
@@ -107,7 +107,7 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
         return json.toString()
     }
 
-    // 📑 Загрузка JSON с метаданными
+    // upload JSON + metadata
     private fun uploadMetadata(photo: PhotoEntity): Boolean {
         return try {
             val jsonContent = buildMetadataJson(photo)
@@ -132,15 +132,15 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
                 val err = conn.errorStream?.use { es ->
                     es.readBytes().toString(Charsets.UTF_8)
                 }
-                Log.e("Azure", "Ошибка загрузки JSON для ${File(photo.imagePath).name}: HTTP $code, $err")
+                Log.e("Azure", "JSON upload error for${File(photo.imagePath).name}: HTTP $code, $err")
             } else {
-                Log.d("Azure", "JSON ${File(photo.imagePath).name}.json успешно загружен")
+                Log.d("Azure", "JSON ${File(photo.imagePath).name}.json successfully uploaded")
             }
 
             conn.disconnect()
             success
         } catch (e: Exception) {
-            Log.e("Azure", "Ошибка при отправке JSON для ${photo.imagePath}", e)
+            Log.e("Azure", "Error sending JSON for ${photo.imagePath}", e)
             false
         }
     }
