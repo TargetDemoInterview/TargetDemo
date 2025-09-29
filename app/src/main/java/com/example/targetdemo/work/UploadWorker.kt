@@ -8,6 +8,7 @@ import com.example.targetdemo.db.AppDatabase
 import com.example.targetdemo.db.PhotoEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -24,13 +25,19 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
 
         for ((idx, photo) in allPhotos.withIndex()) {
             Log.d("Azure", "[$idx/${allPhotos.size}] Пытаюсь отправить: ${File(photo.imagePath).name}")
+
             if (uploadFileToAzure(photo)) {
-                db.photoDao().deleteById(photo.id)
-                val formatted = SimpleDateFormat("MM/dd/yyyy HH:mm:ss", Locale.getDefault())
-                    .format(Date(photo.timestamp))
-                Log.d("Azure", "$formatted | ${File(photo.imagePath).name} → отправлен и удалён из БД")
+                if (uploadMetadata(photo)) {
+                    db.photoDao().deleteById(photo.id)
+                    val formatted = SimpleDateFormat("MM/dd/yyyy HH:mm:ss", Locale.getDefault())
+                        .format(Date(photo.timestamp))
+                    Log.d("Azure", "$formatted | Фото и JSON ${File(photo.imagePath).name} → отправлены и запись удалена")
+                } else {
+                    Log.e("Azure", "Фото загружено, но JSON не удалось отправить: ${photo.imagePath}")
+                    return@withContext Result.retry()
+                }
             } else {
-                Log.e("Azure", "Не удалось отправить: ${photo.imagePath}. Повторим позже.")
+                Log.e("Azure", "Не удалось отправить фото: ${photo.imagePath}")
                 return@withContext Result.retry()
             }
         }
@@ -38,6 +45,7 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
         Result.success()
     }
 
+    // 📸 Загрузка самого фото
     private fun uploadFileToAzure(photo: PhotoEntity): Boolean {
         return try {
             val file = File(photo.imagePath)
@@ -52,22 +60,13 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
             val conn = (URL(blobUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "PUT"
                 doOutput = true
-                doInput = true
-
-                // ВАЖНО: Azure ожидает тип блоба
                 setRequestProperty("x-ms-blob-type", "BlockBlob")
-
-                // Рекомендуемая версия — пусть совпадает с SAS sv
                 setRequestProperty("x-ms-version", "2024-11-04")
-
-                // Не обязательно, но полезно
                 setRequestProperty("Content-Type", "application/octet-stream")
 
-                // Потоковый режим (чтобы не падало на больших файлах и не требовало Content-Length вручную)
                 if (file.length() <= Int.MAX_VALUE) {
                     setFixedLengthStreamingMode(file.length().toInt())
                 } else {
-                    // на очень больших — chunked
                     setChunkedStreamingMode(64 * 1024)
                 }
             }
@@ -81,21 +80,67 @@ class UploadWorker(appContext: Context, workerParams: WorkerParameters) :
 
             val code = conn.responseCode
             val success = code in 200..299
-
             if (!success) {
                 val err = conn.errorStream?.use { es ->
                     es.readBytes().toString(Charsets.UTF_8)
                 }
-                Log.e("Azure", "HTTP $code при загрузке ${file.name}. error=$err")
+                Log.e("Azure", "Ошибка загрузки фото ${file.name}: HTTP $code, $err")
             } else {
-                // Удобный короткий лог успеха
-                Log.d("Azure", "Uploaded ${file.name}, HTTP $code")
+                Log.d("Azure", "Фото ${file.name} успешно загружено, HTTP $code")
             }
 
             conn.disconnect()
             success
         } catch (e: Exception) {
-            Log.e("Azure", "Ошибка загрузки ${photo.imagePath}", e)
+            Log.e("Azure", "Ошибка при загрузке фото ${photo.imagePath}", e)
+            false
+        }
+    }
+
+    // 📝 Формируем JSON-метаданные
+    private fun buildMetadataJson(photo: PhotoEntity): String {
+        val json = JSONObject()
+        json.put("fileName", File(photo.imagePath).name)
+        json.put("location", photo.location ?: "unknown")
+        json.put("deviceName", photo.deviceName)
+        json.put("timestamp", photo.timestamp)
+        return json.toString()
+    }
+
+    // 📑 Загрузка JSON с метаданными
+    private fun uploadMetadata(photo: PhotoEntity): Boolean {
+        return try {
+            val jsonContent = buildMetadataJson(photo)
+            val jsonBytes = jsonContent.toByteArray(Charsets.UTF_8)
+
+            val blobUrl = "https://storagelv426.blob.core.windows.net/containerlv426/${File(photo.imagePath).name}.json" +
+                    "?sp=racwl&st=2025-09-28T21:30:45Z&se=2025-10-29T05:45:45Z&spr=https&sv=2024-11-04&sr=c&sig=gH5UAz29ClqswdTlqytGcT%2BU25vZdOUamjdnGVOgSx4%3D"
+
+            val conn = (URL(blobUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "PUT"
+                doOutput = true
+                setRequestProperty("x-ms-blob-type", "BlockBlob")
+                setRequestProperty("Content-Type", "application/json")
+                setFixedLengthStreamingMode(jsonBytes.size)
+            }
+
+            conn.outputStream.use { it.write(jsonBytes) }
+
+            val code = conn.responseCode
+            val success = code in 200..299
+            if (!success) {
+                val err = conn.errorStream?.use { es ->
+                    es.readBytes().toString(Charsets.UTF_8)
+                }
+                Log.e("Azure", "Ошибка загрузки JSON для ${File(photo.imagePath).name}: HTTP $code, $err")
+            } else {
+                Log.d("Azure", "JSON ${File(photo.imagePath).name}.json успешно загружен")
+            }
+
+            conn.disconnect()
+            success
+        } catch (e: Exception) {
+            Log.e("Azure", "Ошибка при отправке JSON для ${photo.imagePath}", e)
             false
         }
     }
